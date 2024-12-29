@@ -1,0 +1,147 @@
+---
+- name: Install StrongSwan and IPTables Persistent
+  apt:
+    name:
+      - strongswan
+      - iptables
+      - iptables-persistent
+    state: present
+    
+- name: Configure StrongSwan with ipsec.conf
+  copy:
+    content: |
+      config setup
+        charondebug="cfg 4, dmn 4, ike 4, net 4"
+        # charondebug="ike 3, knl 1, cfg 3"
+        uniqueids=replace
+
+      conn gateway-to-server
+        auto=add
+        compress=no
+        type=tunnel
+        keyexchange=ikev2
+        fragmentation=yes
+        forceencaps=yes
+        dpdaction=clear
+        dpddelay=30s
+        dpdtimeout=180s
+        rekey=yes
+        authby=secret
+        ike=aes256gcm12-sha256-modp4096,aes128gcm12-sha256-modp4096!
+        esp=aes256gcm12-sha256,aes128gcm12-sha256!
+        left=192.168.20.2
+        leftid=@gateway
+        leftsubnet=0.0.0.0/0
+        leftsourceip=10.8.0.1
+        right=%any
+        rightid=@server
+        rightsourceip=10.8.0.2/32
+        mobike=no
+    dest: /etc/ipsec.conf
+    owner: root
+    group: root
+    mode: '0644'
+
+- name: Configure IPsec secrets
+  copy:
+    content: |
+      @gateway @server : PSK "{{ vpn_psk }}"
+    dest: /etc/ipsec.secrets
+    owner: root
+    group: root
+    mode: '0600'
+
+- name: Enable and start StrongSwan
+  systemd:
+    name: strongswan-starter
+    enabled: yes
+    state: restarted
+
+- name: Enable IP forwarding
+  sysctl:
+    name: net.ipv4.ip_forward
+    value: '1'
+    sysctl_set: yes
+    state: present
+    reload: yes
+
+- name: Flush all iptables rules
+  iptables:
+    table: "{{ item }}"
+    flush: yes
+  with_items:
+  - filter
+  - nat
+  notify: Save IPTables
+
+- name: Set default policies
+  iptables:
+    chain: "{{ item.chain }}"
+    policy: "{{ item.policy }}"
+  with_items:
+  - { chain: INPUT, policy: ACCEPT }
+  - { chain: FORWARD, policy: ACCEPT }
+  - { chain: OUTPUT, policy: ACCEPT }
+
+- name: Allow all loopback traffic
+  iptables:
+    chain: INPUT
+    in_interface: lo
+    jump: ACCEPT
+  notify: Save IPTables
+
+- name: Drop traffic to 127/8 that doesn't use lo0
+  iptables:
+    chain: INPUT
+    destination: 127.0.0.0/8
+    jump: REJECT
+  notify: Save IPTables
+
+- name: Allow established and related traffic on INPUT chain
+  iptables:
+    chain: INPUT
+    ctstate: ESTABLISHED,RELATED
+    jump: ACCEPT
+  notify: Save IPTables
+
+- name: Allow established and related traffic on FORWARD chain
+  iptables:
+    chain: FORWARD
+    ctstate: ESTABLISHED,RELATED
+    jump: ACCEPT
+  notify: Save IPTables
+
+- name: Allow SSH
+  iptables:
+    chain: INPUT
+    protocol: tcp
+    destination_port: 22
+    jump: ACCEPT
+
+- name: Allow forwarding of HTTP traffic on port 80
+  iptables:
+    chain: FORWARD
+    protocol: tcp
+    destination_port: 80
+    jump: ACCEPT
+  notify: Save IPTables
+
+- name: Add DNAT rule for HTTP traffic to internal server
+  iptables:
+    table: nat
+    chain: PREROUTING
+    protocol: tcp
+    destination_port: 80
+    jump: DNAT
+    to_destination: 10.8.0.2
+  notify: Save IPTables
+
+- name: Add masquerade rule for all outgoing traffic
+  iptables:
+    table: nat
+    chain: POSTROUTING
+    jump: MASQUERADE
+  notify: Save IPTables
+
+- meta: flush_handlers
+

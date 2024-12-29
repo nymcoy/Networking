@@ -1,0 +1,125 @@
+---
+- name: Delete existing default route
+  command: ip route del default
+  ignore_errors: yes
+
+- name: Add default route to router
+  command: ip route add default via 192.168.10.1
+
+- name: Install StrongSwan
+  apt:
+    name: strongswan-starter
+    state: present
+
+- name: Install Nginx
+  apt:
+    name: nginx
+    state: present
+
+- name: Create a simple HTML page
+  copy:
+    content: |
+      <html>
+      <head>
+          <title>Welcome to the Server</title>
+      </head>
+      <body>
+          <h1>Hello from the Server!</h1>
+      </body>
+      </html>
+    dest: /var/www/html/index.html
+    owner: www-data
+    group: www-data
+    mode: '0644'
+
+- name: Start and enable Nginx
+  systemd:
+    name: nginx
+    enabled: yes
+    state: started
+
+- name: Configure StrongSwan with ipsec.conf
+  copy:
+    content: |
+      config setup
+        # charondebug="ike 3, knl 1, cfg 3"
+        charondebug="cfg 4, dmn 4, ike 4, net 4"
+        uniqueids=replace
+
+      conn gateway-to-server
+        auto=start
+        compress=no
+        type=tunnel
+        keyexchange=ikev2
+        fragmentation=yes
+        forceencaps=yes
+        closeaction=restart
+        dpdaction=restart
+        dpddelay=30s
+        dpdtimeout=180s
+        rekey=yes
+        authby=secret
+        ike=aes256gcm12-sha256-modp4096,aes128gcm12-sha256-modp4096!
+        esp=aes256gcm12-sha256,aes128gcm12-sha256!
+        right=192.168.20.2
+        rightid=@gateway
+        rightsubnet=192.168.20.0/24
+        # rightsourceip=%config
+        left=%any
+        leftid=@server
+        leftsourceip=%config
+        mobike=no
+    dest: /etc/ipsec.conf
+    owner: root
+    group: root
+    mode: '0644'
+
+- name: Configure IPsec secrets
+  copy:
+    content: |
+      @server @gateway : PSK "{{ vpn_psk }}"
+    dest: /etc/ipsec.secrets
+    owner: root
+    group: root
+    mode: '0600'
+
+- name: Restart StrongSwan service
+  systemd:
+    name: strongswan-starter
+    enabled: yes
+    state: restarted
+
+- name: Deploy gateway check script
+  copy:
+    src: files/check_gateway.sh
+    dest: /usr/local/bin/check_gateway.sh
+    owner: root
+    group: root
+    mode: '0755'
+
+- name: Set up cron job for gateway check
+  cron:
+    name: "Check IPsec connection status"
+    minute: "*/5"
+    job: "/usr/local/bin/check_gateway.sh"
+
+- name: Deploy logrotate configuration for gateway check log
+  copy:
+    content: |
+      /var/log/gateway_check.log {
+          daily
+          missingok
+          rotate 7
+          compress
+          delaycompress
+          notifempty
+          create 0640 root adm
+          sharedscripts
+          postrotate
+              /usr/bin/systemctl reload rsyslog > /dev/null 2>&1 || true
+          endscript
+      }
+    dest: /etc/logrotate.d/gateway_check
+    owner: root
+    group: root
+    mode: '0644'

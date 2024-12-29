@@ -1,0 +1,6 @@
+---
+- name: Update and dist-upgrade apt packages
+  apt:
+    update_cache: yes
+    upgrade: dist
+
